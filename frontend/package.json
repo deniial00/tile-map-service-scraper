@@ -1,0 +1,22 @@
+{
+    "name": "kataster-tile-viewer",
+    "private": true,
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+      "dev": "vite",
+      "build": "vite build",
+      "preview": "vite preview",
+      "serve": "serve dist -s -l 3000"
+    },
+    "dependencies": {
+      "solid-js": "^1.8.5",
+      "maplibre-gl": "^3.6.0"
+    },
+    "devDependencies": {
+      "vite": "^5.0.0",
+      "vite-plugin-solid": "^2.7.2",
+      "@types/maplibre-gl": "^1.14.0",
+      "serve": "^14.2.1"
+    }
+  }
