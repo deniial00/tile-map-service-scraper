@@ -2,16 +2,15 @@ version: '3.8'
 
 services:
   backend:
-    build: 
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8080:5000"
-    environment:
-      - ZOOM_LEVEL=16
-      - SLEEP_BETWEEN_REQUESTS=100
+    build: ./backend
     volumes:
       - ./data:/data
+      - ./backend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - ZOOM_LEVEL=16
 
   # frontend:
   #   build:

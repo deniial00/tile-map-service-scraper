@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y \
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies with verbose output and verify installation
+RUN npm install --verbose && \
+    ls -la node_modules && \
+    ls -la node_modules/express
 
 # Copy source code
 COPY . .
@@ -23,6 +25,10 @@ RUN mkdir -p /app/data
 
 # Set environment variables
 ENV NODE_ENV=production
+ENV PORT=3000
 
-# Run the scraper
-CMD ["node", "scraper.js"] 
+# Expose the API port
+EXPOSE 3000
+
+# Run the API server instead of the scraper directly
+CMD ["node", "api.js"] 
