@@ -1,55 +1,26 @@
 version: '3.8'
 
 services:
-  scraper:
-    build:
-      context: .
-      dockerfile: docker/scraper.Dockerfile
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-    environment:
-      - SLEEP_BETWEEN_REQUESTS=100
-      - NUM_TILES_TO_SCRAPE=5000
-      - ZOOM_LEVEL=16
-    restart: unless-stopped
-    depends_on:
-      - db-init
-
   backend:
-    build:
-      context: .
-      dockerfile: docker/backend.Dockerfile
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
-      - "8000:8000"
-    volumes:
-      - ./data:/app/data
+      - "8080:5000"
     environment:
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      - db-init
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  frontend:
-    build:
-      context: .
-      dockerfile: docker/frontend.Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      - BACKEND_URL=http://backend:8000
-    depends_on:
-      - backend
-
-  db-init:
-    build:
-      context: .
-      dockerfile: docker/db-init.Dockerfile
+      - ZOOM_LEVEL=16
+      - SLEEP_BETWEEN_REQUESTS=100
     volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-    command: ["python", "init_db.py"]
+      - ./data:/data
+
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - backend
+
+volumes:
+  tilesdata:
