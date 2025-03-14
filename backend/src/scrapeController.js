@@ -35,11 +35,15 @@ export class ScraperController {
     }
 
     async getStatus() {
+        const tileCount = await this.scraper.db.getTileCount();
         const status = {
             isInitialized: this.isInitialized,
             isRunning: this.isRunning,
             currentOperation: this.currentOperation,
-            stats: this.stats
+            stats: {
+                ...this.stats,
+                totalTiles: parseInt(tileCount.count)
+            }
         };
 
         if (this.currentOperation === 'generating_tiles') {
@@ -48,7 +52,7 @@ export class ScraperController {
                 duration: this.stats.initializationStartTime ? 
                     (new Date() - this.stats.initializationStartTime) / 1000 : 0,
                 processedTiles: this.stats.processedTiles,
-                totalTiles: this.stats.totalTiles,
+                totalTiles: parseInt(tileCount.count),
                 currentZoom: this.stats.currentZoom
             };
         }
@@ -60,14 +64,21 @@ export class ScraperController {
         this.stats = { ...this.stats, ...stats, lastUpdate: new Date() };
     }
 
+    async updateScrapingStats(processed, updated) {
+        this.updateStats({
+            processedTiles: processed,
+            updatedTiles: updated
+        });
+    }
+
     async generateTilesInBackground() {
         try {
             this.currentOperation = 'generating_tiles';
             this.updateStats({ initializationStartTime: new Date() });
             
             // Get total tiles to process
-            const tileCount = await this.scraper.db.get('SELECT COUNT(*) as count FROM tiles');
-            this.updateStats({ totalTiles: tileCount.count });
+            const tileCount = await this.scraper.db.getTileCount();
+            this.updateStats({ totalTiles: parseInt(tileCount.count) });
 
             await this.scraper.generateTiles();
             
@@ -103,6 +114,7 @@ export class ScraperController {
             this.isRunning = true;
             this.currentOperation = 'scraping';
             this.stats.initializationStartTime = new Date();
+            this.updateStats({ processedTiles: 0, updatedTiles: 0 }); // Reset stats at start
 
             // Initialize scraper if not already done
             if (!this.isInitialized) {
@@ -112,6 +124,11 @@ export class ScraperController {
 
             // Pass current settings to scraper
             this.scraper.settings = { ...this.settings };
+            
+            // Set up stats update callback
+            this.scraper.onStatsUpdate = (processed, updated) => {
+                this.updateScrapingStats(processed, updated);
+            };
 
             // Start scraping in the background
             this.tileGenerationPromise = this.scraper.scrapePbfTiles()
@@ -138,17 +155,8 @@ export class ScraperController {
 
     async loadSettings() {
         try {
-            const settings = await this.scraper.db.all('SELECT key, value FROM settings');
-            const loadedSettings = {};
+            const loadedSettings = await this.scraper.db.getSettings();
             
-            for (const setting of settings) {
-                try {
-                    loadedSettings[setting.key] = JSON.parse(setting.value);
-                } catch (e) {
-                    console.error(`Error parsing setting ${setting.key}:`, e);
-                }
-            }
-
             // Merge with defaults, keeping defaults for missing settings
             this.settings = { ...this.settings, ...loadedSettings };
             return this.settings;
@@ -160,20 +168,10 @@ export class ScraperController {
 
     async saveSettings(settings) {
         try {
-            await this.scraper.db.exec('BEGIN TRANSACTION');
-            
-            for (const [key, value] of Object.entries(settings)) {
-                await this.scraper.db.run(
-                    'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
-                    [key, JSON.stringify(value)]
-                );
-            }
-            
-            await this.scraper.db.exec('COMMIT');
+            await this.scraper.db.saveSettings(settings);
             this.settings = { ...this.settings, ...settings };
             return this.settings;
         } catch (error) {
-            await this.scraper.db.exec('ROLLBACK');
             throw error;
         }
     }

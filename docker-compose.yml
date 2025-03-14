@@ -1,25 +1,47 @@
 version: '3.8'
 
 services:
-  backend:
-    build: ./backend
+  postgres:
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+    platform: linux/arm64/v8
+    ports:
+      - "${POSTGRES_PORT}:5432"
     volumes:
-      - ./data:/data
-      - ./backend:/app
-      - /app/node_modules
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - ZOOM_LEVEL=${ZOOM_LEVEL}
+    volumes:
+      - ./backend/data/austria.geojson:/data/austria.geojson
+      - ./logs/http.log:/data/http.log
+      - ./logs/scraper.log:/data/scraper.log
     ports:
       - "3000:3000"
-    environment:
-      - ZOOM_LEVEL=16
-
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "3000:3000"
-  #   depends_on:
-  #     - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
-  tilesdata:
+  postgres_data:
+    driver: local

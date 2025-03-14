@@ -21,7 +21,7 @@ RUN npm install --verbose && \
 COPY . .
 
 # Create data directory
-RUN mkdir -p /app/data
+RUN mkdir -p data
 
 # Set environment variables
 ENV NODE_ENV=production

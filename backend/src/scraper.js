@@ -1,6 +1,4 @@
 import fs from 'fs';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
 import { bbox } from '@turf/turf';
 import booleanIntersects from '@turf/boolean-intersects';
 import path from 'path';
@@ -8,6 +6,7 @@ import { Logger } from './logger.js';
 import { PriorityQueue } from './priorityQueue.js';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
+import { Database } from './database.js';
 
 // Sleep helper function
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -16,8 +15,7 @@ export class TMSScraper {
     constructor() {
         this.minZoom = 10;
         this.maxZoom = parseInt(process.env.ZOOM_LEVEL || '16');
-        this.dbPath = '/data/tiles.db';
-        this.geojsonPath = '/data/austria.geojson';
+        this.geojsonPath = 'data/austria.geojson';
         this.austriaData = null;
         this.priorityQueue = new PriorityQueue();
         this.settings = {
@@ -35,91 +33,21 @@ export class TMSScraper {
         if (isNaN(this.maxZoom)) {
             throw new Error('Invalid ZOOM_LEVEL environment variable');
         }
+
+        // Initialize database with PostgreSQL configuration
+        this.db = new Database({
+            type: 'postgres',
+            user: process.env.POSTGRES_USER || 'postgres',
+            host: process.env.POSTGRES_HOST || 'localhost',
+            database: process.env.POSTGRES_DB || 'tmss',
+            password: process.env.POSTGRES_PASSWORD || 'postgres',
+            port: parseInt(process.env.POSTGRES_PORT || '5432')
+        });
     }
 
     async init() {
-        // Ensure data directory exists
-        const dataDir = path.dirname(this.dbPath);
-        if (!fs.existsSync(dataDir)) {
-            fs.mkdirSync(dataDir, { recursive: true });
-        }
-
-        // Initialize SQLite database first
-        this.db = await open({
-            filename: this.dbPath,
-            driver: sqlite3.Database
-        });
-
-        // Enable WAL mode and other optimizations
-        await this.db.exec(`
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA temp_store = MEMORY;
-            PRAGMA cache_size = -64000; -- 64MB cache
-
-            -- Remove logs table if it exists
-            DROP TABLE IF EXISTS logs;
-        `);
-
-        // Create tiles table if it doesn't exist
-        await this.db.exec(`
-            CREATE TABLE IF NOT EXISTS tiles (
-                x INTEGER,
-                y INTEGER,
-                z INTEGER,
-                parent_x INTEGER,
-                parent_y INTEGER,
-                parent_z INTEGER,
-                PRIMARY KEY (x, y, z)
-            )
-        `);
-
-        // Create PBF tiles table
-        await this.db.exec(`
-            CREATE TABLE IF NOT EXISTS pbf_tiles (
-                x INTEGER,
-                y INTEGER,
-                z INTEGER,
-                data BLOB,
-                hash TEXT,
-                last_modified DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (x, y, z)
-            )
-        `);
-
-        // Create PBF history table - simplified schema
-        await this.db.exec(`
-            CREATE TABLE IF NOT EXISTS pbf_tiles_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                x INTEGER,
-                y INTEGER,
-                z INTEGER,
-                data BLOB,
-                hash TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Create settings table
-        await this.db.exec(`
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Add indices for faster queries
-        await this.db.exec(`
-            CREATE INDEX IF NOT EXISTS idx_pbf_modified 
-            ON pbf_tiles(last_modified);
-            
-            CREATE INDEX IF NOT EXISTS idx_history_coords 
-            ON pbf_tiles_history(x, y, z);
-            
-            CREATE INDEX IF NOT EXISTS idx_history_date 
-            ON pbf_tiles_history(created_at);
-        `);
+        // Initialize database
+        await this.db.init();
 
         // Initialize logger after database is ready
         this.logger = new Logger('init');
@@ -134,34 +62,14 @@ export class TMSScraper {
         await this.logger.info('Loading Austria GeoJSON...');
         this.austriaData = JSON.parse(fs.readFileSync(this.geojsonPath, 'utf8'));
 
-        // Prepare statements
-        this.insertTileStmt = await this.db.prepare(`
-            INSERT OR IGNORE INTO tiles (x, y, z, parent_x, parent_y, parent_z)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `);
-
-        this.insertPbfStmt = await this.db.prepare(`
-            INSERT OR REPLACE INTO pbf_tiles (x, y, z, data, hash, last_modified)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        `);
-
-        this.insertHistoryStmt = await this.db.prepare(`
-            INSERT INTO pbf_tiles_history (x, y, z, data, hash)
-            VALUES (?, ?, ?, ?, ?)
-        `);
+        // Load settings from database
+        const dbSettings = await this.db.getSettings();
+        this.settings = { ...this.settings, ...dbSettings };
     }
 
     async close() {
         if (this.db) {
-            try {
-                // Finalize prepared statement before closing
-                if (this.insertTileStmt) {
-                    await this.insertTileStmt.finalize();
-                }
-                await this.db.close();
-            } catch (error) {
-                await this.logger.error('Error during cleanup:', { error: error.message });
-            }
+            await this.db.close();
         }
     }
 
@@ -230,10 +138,7 @@ export class TMSScraper {
         
         for (let zoom = this.minZoom + 1; zoom <= this.maxZoom; zoom++) {
             await this.logger.info(`Processing zoom level ${zoom}`);
-            const parentTiles = await this.db.all(
-                'SELECT x, y, z FROM tiles WHERE z = ?',
-                [zoom - 1]
-            );
+            const parentTiles = await this.db.getTilesByZoom(zoom - 1);
 
             await this.logger.info(`Total tiles to check: ${parentTiles.length*4}`);
             let tileBatch = [];
@@ -276,7 +181,7 @@ export class TMSScraper {
             }
             
             const tileCount = await this.db.get(
-                'SELECT COUNT(*) as count FROM tiles WHERE z = ?',
+                'SELECT COUNT(*) as count FROM tiles WHERE z = $1',
                 [zoom]
             );
             await this.logger.info(`Found ${tileCount.count} tiles at zoom level ${zoom}`);
@@ -286,19 +191,21 @@ export class TMSScraper {
     async batchInsertTiles(tiles) {
         if (tiles.length === 0) return;
 
-        const placeholders = tiles.map(() => '(?, ?, ?, ?, ?, ?)').join(',');
-        const values = tiles.flat();
-
-        await this.db.exec('BEGIN TRANSACTION');
+        const client = await this.db.connect();
         try {
-            await this.db.run(`
-                INSERT OR IGNORE INTO tiles (x, y, z, parent_x, parent_y, parent_z)
-                VALUES ${placeholders}
-            `, values);
-            await this.db.exec('COMMIT');
+            await client.query('BEGIN');
+            for (const tile of tiles) {
+                await client.query(
+                    'INSERT INTO tiles (x, y, z, parent_x, parent_y, parent_z) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (x, y, z) DO NOTHING',
+                    tile
+                );
+            }
+            await client.query('COMMIT');
         } catch (error) {
-            await this.db.exec('ROLLBACK');
+            await client.query('ROLLBACK');
             throw error;
+        } finally {
+            client.release();
         }
     }
 
@@ -315,27 +222,33 @@ export class TMSScraper {
         await this.logger.info(`Total tiles to check: ${(maxX - minX + 1) * (maxY - minY + 1)}`);
         
         let tilesFound = 0;
-        await this.db.exec('BEGIN TRANSACTION');
+        const client = await this.db.connect();
         try {
+            await client.query('BEGIN');
             for (let x = minX; x <= maxX; x++) {
                 for (let y = minY; y <= maxY; y++) {
                     const intersects = await this.tileIntersectsAustria(x, y, zoom);
                     if (intersects) {
-                        await this.insertTileStmt.run([x, y, zoom, null, null, null]);
+                        await client.query(
+                            'INSERT INTO tiles (x, y, z, parent_x, parent_y, parent_z) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (x, y, z) DO NOTHING',
+                            [x, y, zoom, null, null, null]
+                        );
                         tilesFound++;
                         if (tilesFound % 1000 === 0) {
-                            await this.db.exec('COMMIT');
-                            await this.db.exec('BEGIN TRANSACTION');
+                            await client.query('COMMIT');
+                            await client.query('BEGIN');
                             await this.logger.info(`Found ${tilesFound} intersecting tiles so far...`);
                         }
                     }
                 }
             }
-            await this.db.exec('COMMIT');
+            await client.query('COMMIT');
         } catch (error) {
             await this.logger.error('Error during initial tile generation:', { error: error.message });
-            await this.db.exec('ROLLBACK');
+            await client.query('ROLLBACK');
             throw error;
+        } finally {
+            client.release();
         }
         
         await this.logger.info(`Total tiles found: ${tilesFound}`);
@@ -381,26 +294,21 @@ export class TMSScraper {
     }
 
     async loadTilesIntoQueue() {
-        // Build zoom level condition
-        let zoomCondition = '';
-        let params = [`-${this.settings.updateInterval} hours`, this.settings.batchSize];
-        
-        if (this.settings.zoomLevels && this.settings.zoomLevels.length > 0) {
-            // If specific zoom levels are specified, only use those
-            zoomCondition = 'AND t.z IN (' + this.settings.zoomLevels.join(',') + ')';
-        } else {
-            // Otherwise use the min/max zoom range
-            zoomCondition = 'AND t.z BETWEEN ? AND ?';
-            params = [
-                `-${this.settings.updateInterval} hours`,
-                this.settings.minZoom,
-                this.settings.maxZoom,
-                this.settings.batchSize
-            ];
-        }
+        // Log settings before building query
+        console.log('Current settings:', {
+            zoomLevels: this.settings.zoomLevels,
+            minZoom: this.settings.minZoom,
+            maxZoom: this.settings.maxZoom,
+            updateInterval: this.settings.updateInterval,
+            batchSize: this.settings.batchSize
+        });
+
+        // Always use maxZoom if no specific zoom level is set
+        const zoomLevel = this.settings.zoomLevels?.[0] || this.settings.maxZoom;
+        console.log('Using zoom level:', zoomLevel);
 
         // Get tiles that need updating, ordered by priority
-        const tiles = await this.db.all(`
+        const query = `
             SELECT 
                 t.x, t.y, t.z,
                 p.last_modified,
@@ -408,43 +316,66 @@ export class TMSScraper {
             FROM tiles t
             LEFT JOIN pbf_tiles p ON t.x = p.x AND t.y = p.y AND t.z = p.z
             WHERE (p.last_modified IS NULL 
-               OR p.last_modified < datetime('now', ?))
-            ${zoomCondition}
+               OR p.last_modified < NOW() - interval '${this.settings.updateInterval} hours')
+            AND t.z = $1
             ORDER BY 
-                t.z DESC,  -- Higher zoom levels first
-                COALESCE(p.last_modified, '1970-01-01') ASC  -- Older tiles first
-            LIMIT ?
-        `, params);
+                COALESCE(p.last_modified, '1970-01-01'::timestamp) ASC  -- Older tiles first
+            LIMIT ${this.settings.batchSize}
+        `;
 
-        await this.logger.info('Loading tiles into priority queue', { 
-            count: tiles.length,
-            settings: this.settings,
-            zoomCondition
+        const params = [zoomLevel];
+
+        console.log('Executing query:', {
+            query,
+            params,
+            zoomLevel
         });
 
-        for (const tile of tiles) {
-            // Calculate priority based on:
-            // 1. Zoom level (higher = more important)
-            // 2. Age (older = more important)
-            // 3. Whether it's never been fetched (highest priority)
-            const age = tile.last_modified ? 
-                (new Date() - new Date(tile.last_modified).getTime()) / (1000 * 60 * 60) : // hours
-                Infinity;
-            
-            const priority = (tile.z * 1000) + // Zoom level weight
-                           (age * 100) +       // Age weight
-                           (tile.last_modified ? 0 : 10000); // Never fetched bonus
+        try {
+            const result = await this.db.run(query, params);
+            if (!result || !result.rows) {
+                console.error('No result or rows from query:', { result });
+                return;
+            }
 
-            this.priorityQueue.enqueue(tile, priority);
+            const tiles = result.rows;
+            console.log(`Query returned ${tiles.length} tiles`);
+
+            await this.logger.info('Loading tiles into priority queue', { 
+                count: tiles.length,
+                settings: this.settings,
+                zoomLevel,
+                params,
+                query
+            });
+
+            for (const tile of tiles) {
+                // Calculate priority based on:
+                // 1. Age (older = more important)
+                // 2. Whether it's never been fetched (highest priority)
+                const age = tile.last_modified ? 
+                    (new Date() - new Date(tile.last_modified).getTime()) / (1000 * 60 * 60) : // hours
+                    Infinity;
+                
+                const priority = (age * 100) +       // Age weight
+                               (tile.last_modified ? 0 : 10000); // Never fetched bonus
+
+                this.priorityQueue.enqueue(tile, priority);
+            }
+
+            await this.logger.info('Priority queue loaded', {
+                queueSize: this.priorityQueue.size(),
+                zoomLevel
+            });
+        } catch (error) {
+            console.error('Error executing query:', error);
+            await this.logger.error('Failed to load tiles into queue', {
+                error: error.message,
+                query,
+                params
+            });
+            throw error;
         }
-
-        await this.logger.info('Priority queue loaded', { 
-            queueSize: this.priorityQueue.size(),
-            maxZoom: this.settings.maxZoom,
-            minZoom: this.settings.minZoom,
-            zoomLevels: this.settings.zoomLevels,
-            settings: this.settings
-        });
     }
 
     async scrapePbfTiles() {
@@ -499,8 +430,9 @@ export class TMSScraper {
 
                 // Only update if the tile is new or different
                 if (!tile.hash || tile.hash !== newHash) {
-                    await this.db.exec('BEGIN TRANSACTION');
+                    const client = await this.db.connect();
                     try {
+                        await client.query('BEGIN');
                         await this.logger.info('Updating tile', { 
                             x: tile.x, 
                             y: tile.y, 
@@ -512,28 +444,22 @@ export class TMSScraper {
 
                         // Only insert into history if there's an existing version
                         if (tile.hash) {
-                            await this.insertHistoryStmt.run([
-                                tile.x,
-                                tile.y,
-                                tile.z,
-                                pbfData,
-                                newHash
-                            ]);
+                            await client.query(
+                                'INSERT INTO pbf_tiles_history (x, y, z, data, hash) VALUES ($1, $2, $3, $4, $5)',
+                                [tile.x, tile.y, tile.z, pbfData, newHash]
+                            );
                         }
 
                         // Update current version
-                        await this.insertPbfStmt.run([
-                            tile.x,
-                            tile.y,
-                            tile.z,
-                            pbfData,
-                            newHash
-                        ]);
+                        await client.query(
+                            'INSERT INTO pbf_tiles (x, y, z, data, hash, last_modified) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) ON CONFLICT (x, y, z) DO UPDATE SET data = EXCLUDED.data, hash = EXCLUDED.hash, last_modified = CURRENT_TIMESTAMP',
+                            [tile.x, tile.y, tile.z, pbfData, newHash]
+                        );
 
-                        await this.db.exec('COMMIT');
+                        await client.query('COMMIT');
                         updated++;
                     } catch (error) {
-                        await this.db.exec('ROLLBACK');
+                        await client.query('ROLLBACK');
                         await this.logger.error('Failed to update tile', {
                             error: error.message,
                             x: tile.x,
@@ -541,10 +467,18 @@ export class TMSScraper {
                             z: tile.z
                         });
                         throw error;
+                    } finally {
+                        client.release();
                     }
                 }
 
                 processed++;
+                
+                // Update stats through callback if available
+                if (this.onStatsUpdate) {
+                    await this.onStatsUpdate(processed, updated);
+                }
+
                 if (processed % 100 === 0) {
                     await this.logger.info('Scraping progress', {
                         processed,
@@ -572,6 +506,11 @@ export class TMSScraper {
                     errors
                 });
             }
+        }
+
+        // Final stats update
+        if (this.onStatsUpdate) {
+            await this.onStatsUpdate(processed, updated);
         }
 
         // Get statistics
