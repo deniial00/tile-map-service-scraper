@@ -26,6 +26,12 @@ export class ScraperController {
             maxZoom: 16,            // Maximum zoom level to scrape
             zoomLevels: []          // Specific zoom levels to scrape (empty means all)
         };
+
+        // Initialize database and settings immediately
+        this.init().catch(error => {
+            console.error('Failed to initialize controller:', error);
+            throw error;
+        });
     }
 
     async getStatus() {
@@ -174,10 +180,15 @@ export class ScraperController {
 
     async init() {
         if (!this.isInitialized) {
-            // Only initialize the database connection without generating tiles
-            await this.scraper.init();
-            await this.loadSettings();
-            this.isInitialized = true;
+            try {
+                // Initialize database and load settings
+                await this.scraper.init();
+                await this.loadSettings();
+                this.isInitialized = true;
+            } catch (error) {
+                this.isInitialized = false;
+                throw error;
+            }
         }
     }
 }

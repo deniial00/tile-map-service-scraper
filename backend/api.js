@@ -18,6 +18,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// Create controller (database will be initialized in constructor)
 const controller = new ScraperController();
 
 // Get current status
@@ -26,9 +27,9 @@ app.get('/api/status', async (req, res) => {
     res.json(status);
 });
 
-// Initialize scraper
+// Generate tiles
 app.post('/api/init', async (req, res) => {
-    // Check if already initializing
+    // Check if already generating tiles
     if (controller.currentOperation === 'generating_tiles') {
         return res.status(400).json({ 
             error: 'Tile generation already in progress',
@@ -37,46 +38,32 @@ app.post('/api/init', async (req, res) => {
     }
 
     try {
-        controller.currentOperation = 'initializing';
-        await controller.scraper.init();
-        
-        // Only generate tiles if not database_only mode
-        if (!req.query.database_only) {
-            // Check if we need to generate tiles
-            const tileCount = await controller.scraper.db.get('SELECT COUNT(*) as count FROM tiles');
-            if (tileCount.count === 0 || req.query.force) {
-                // Start tile generation in background
-                controller.tileGenerationPromise = controller.generateTilesInBackground();
-                
-                res.json({ 
-                    success: true, 
-                    message: 'Initialization started. Tile generation is running in background.',
-                    currentOperation: 'generating_tiles',
-                    force: req.query.force === 'true',
-                    status: await controller.getStatus()
-                });
-                return;
-            } else {
-                res.status(400).json({ 
-                    error: 'Tiles already exist. Use ?force=true to regenerate.',
-                    status: await controller.getStatus()
-                });
-                return;
-            }
+        // Check if we need to generate tiles
+        const tileCount = await controller.scraper.db.get('SELECT COUNT(*) as count FROM tiles');
+        if (tileCount.count === 0 || req.query.force) {
+            controller.currentOperation = 'generating_tiles';
+            // Start tile generation in background
+            controller.tileGenerationPromise = controller.generateTilesInBackground();
+            
+            res.json({ 
+                success: true, 
+                message: 'Tile generation started and running in background.',
+                currentOperation: 'generating_tiles',
+                force: req.query.force === 'true',
+                status: await controller.getStatus()
+            });
+            return;
         }
 
-        // For database_only mode, just return success
-        controller.isInitialized = true;
-        controller.currentOperation = null;
+        // Tiles already exist
         res.json({ 
             success: true, 
-            message: 'Database initialized successfully',
+            message: 'Tiles already exist. Use ?force=true to regenerate tiles.',
             status: await controller.getStatus()
         });
 
     } catch (error) {
         controller.currentOperation = null;
-        controller.isInitialized = false;
         res.status(500).json({ 
             error: error.message,
             status: await controller.getStatus()

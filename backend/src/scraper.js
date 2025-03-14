@@ -449,6 +449,7 @@ export class TMSScraper {
 
     async scrapePbfTiles() {
         this.logger = new Logger('pbf_scraper');
+        const startTime = new Date();
         await this.logger.info('Starting PBF tile scraping', { settings: this.settings });
 
         // Load initial batch of tiles into queue
@@ -580,6 +581,12 @@ export class TMSScraper {
                 (SELECT COUNT(*) FROM pbf_tiles_history) as total_versions
         `);
 
+        const endTime = new Date();
+        const duration = (endTime - startTime) / 1000; // Convert to seconds
+        const hours = Math.floor(duration / 3600);
+        const minutes = Math.floor((duration % 3600) / 60);
+        const seconds = Math.floor(duration % 60);
+
         await this.logger.info('PBF scraping completed', {
             totalProcessed: processed,
             totalUpdated: updated,
@@ -587,6 +594,10 @@ export class TMSScraper {
             currentTiles: stats.current_tiles,
             totalVersions: stats.total_versions,
             successRate: ((processed - errors) / processed * 100).toFixed(2),
+            duration: {
+                total: duration.toFixed(2) + ' seconds',
+                formatted: `${hours}h ${minutes}m ${seconds}s`,
+            },
             settings: this.settings
         });
     }
