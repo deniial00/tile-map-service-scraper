@@ -1,20 +1,24 @@
-import { TMSScraper } from './scraper.js';
-
+import { TMSScraper } from './tileScraper.js';
+import { TileGenerator } from './tileGenerator.js';
+import { Database } from './database.js';
+import { TileServer } from './tileServer.js';
 export class ScraperController {
     constructor() {
-        this.scraper = new TMSScraper();
+        this.db = new Database({
+            type: 'postgres',
+            user: process.env.POSTGRES_USER || 'postgres',
+            host: process.env.POSTGRES_HOST || 'localhost',
+            database: process.env.POSTGRES_DB || 'tmss',
+            password: process.env.POSTGRES_PASSWORD || 'postgres',
+            port: parseInt(process.env.POSTGRES_PORT || '5432')
+        });
+
+        this.scraper = new TMSScraper(this.db);
+        this.tileGenerator = new TileGenerator(this.db);
+        this.tileServer = new TileServer(this.db);
         this.isInitialized = false;
         this.isRunning = false;
         this.currentOperation = null;
-        this.stats = {
-            totalTiles: 0,
-            processedTiles: 0,
-            updatedTiles: 0,
-            currentZoom: null,
-            lastUpdate: new Date(),
-            initializationStartTime: null,
-            initializationEndTime: null
-        };
         this.tileGenerationPromise = null;
         this.settings = {
             batchSize: 1000,        // Number of tiles to load into queue at once
@@ -23,71 +27,74 @@ export class ScraperController {
             updateInterval: 24,     // Hours between updates for each tile
             maxConcurrent: 5,       // Maximum concurrent tile fetches
             minZoom: 10,            // Minimum zoom level to scrape
-            maxZoom: 16,            // Maximum zoom level to scrape
+            maxZoom: process.env.ZOOM_LEVEL || 15,            // Maximum zoom level to scrape
             zoomLevels: []          // Specific zoom levels to scrape (empty means all)
         };
 
         // Initialize database and settings immediately
         this.init().catch(error => {
             console.error('Failed to initialize controller:', error);
+            this.close();
             throw error;
         });
     }
 
+    async close() {
+        if (this.db) {
+            await this.db.close();
+        }
+    }
+
     async getStatus() {
-        const tileCount = await this.scraper.db.getTileCount();
+        const stats = await this.scraper.db.getStats();
+
         const status = {
             isInitialized: this.isInitialized,
             isRunning: this.isRunning,
             currentOperation: this.currentOperation,
             stats: {
-                ...this.stats,
-                totalTiles: parseInt(tileCount.count)
+                ...stats
             }
         };
 
-        if (this.currentOperation === 'generating_tiles') {
+        if (this.currentOperation === 'generating_tiles' && status.stats.initialization_start_time) {
             status.initializationProgress = {
-                startTime: this.stats.initializationStartTime,
-                duration: this.stats.initializationStartTime ? 
-                    (new Date() - this.stats.initializationStartTime) / 1000 : 0,
-                processedTiles: this.stats.processedTiles,
-                totalTiles: parseInt(tileCount.count),
-                currentZoom: this.stats.currentZoom
+                startTime: status.stats.initialization_start_time,
+                duration: (new Date() - new Date(status.stats.initialization_start_time)) / 1000,
+                processedTiles: status.stats.processed_tiles,
+                totalTiles: status.stats.total_tiles,
+                currentZoom: status.stats.current_zoom
             };
         }
 
         return status;
     }
 
-    updateStats(stats) {
-        this.stats = { ...this.stats, ...stats, lastUpdate: new Date() };
-    }
-
-    async updateScrapingStats(processed, updated) {
-        this.updateStats({
-            processedTiles: processed,
-            updatedTiles: updated
-        });
+    async updateStats(stats, append = false) {
+        const updatedStats = {
+            ...stats,
+            lastUpdate: new Date()
+        };
+        await this.scraper.db.saveStats(updatedStats, append);
     }
 
     async generateTilesInBackground() {
         try {
             this.currentOperation = 'generating_tiles';
-            this.updateStats({ initializationStartTime: new Date() });
+            await this.scraper.db.resetTiles();
+            await this.updateStats({ initializationStartTime: new Date() });
             
-            // Get total tiles to process
-            const tileCount = await this.scraper.db.getTileCount();
-            this.updateStats({ totalTiles: parseInt(tileCount.count) });
+            await this.tileGenerator.init();
+            const tileCount = await this.tileGenerator.generateTiles();
 
-            await this.scraper.generateTiles();
-            
+            await this.updateStats({ 
+                initializationEndTime: new Date(), 
+                totalTiles: tileCount 
+            });
+
             this.currentOperation = null;
             this.isInitialized = true;
-            this.updateStats({ 
-                initializationEndTime: new Date(),
-                processedTiles: tileCount.count
-            });
+            
         } catch (error) {
             this.currentOperation = null;
             this.isInitialized = false;
@@ -113,34 +120,22 @@ export class ScraperController {
         try {
             this.isRunning = true;
             this.currentOperation = 'scraping';
-            this.stats.initializationStartTime = new Date();
-            this.updateStats({ processedTiles: 0, updatedTiles: 0 }); // Reset stats at start
 
-            // Initialize scraper if not already done
             if (!this.isInitialized) {
                 await this.scraper.init();
                 this.isInitialized = true;
             }
 
-            // Pass current settings to scraper
             this.scraper.settings = { ...this.settings };
-            
-            // Set up stats update callback
-            this.scraper.onStatsUpdate = (processed, updated) => {
-                this.updateScrapingStats(processed, updated);
-            };
 
-            // Start scraping in the background
             this.tileGenerationPromise = this.scraper.scrapePbfTiles()
-                .then(() => {
+                .then(async () => {
                     this.isRunning = false;
                     this.currentOperation = null;
-                    this.stats.initializationEndTime = new Date();
                 })
-                .catch(error => {
+                .catch(async error => {
                     this.isRunning = false;
                     this.currentOperation = null;
-                    this.stats.initializationEndTime = new Date();
                     throw error;
                 });
 
@@ -148,7 +143,6 @@ export class ScraperController {
         } catch (error) {
             this.isRunning = false;
             this.currentOperation = null;
-            this.stats.initializationEndTime = new Date();
             throw error;
         }
     }
@@ -181,6 +175,7 @@ export class ScraperController {
             try {
                 // Initialize database and load settings
                 await this.scraper.init();
+                await this.tileGenerator.init();
                 await this.loadSettings();
                 this.isInitialized = true;
             } catch (error) {

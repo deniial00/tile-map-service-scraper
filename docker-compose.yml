@@ -33,14 +33,25 @@ services:
       - POSTGRES_PORT=${POSTGRES_PORT}
       - ZOOM_LEVEL=${ZOOM_LEVEL}
     volumes:
+      - ./backend/src:/app/src
+      - ./backend/api.js:/app/api.js
       - ./backend/data/austria.geojson:/data/austria.geojson
-      - ./logs/http.log:/data/http.log
-      - ./logs/scraper.log:/data/scraper.log
+      - ./logs/:/logs/
     ports:
       - "3000:3000"
+    command: ["npm", "run", "${OPMODE}"]
     depends_on:
       postgres:
         condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
 
 volumes:
   postgres_data:

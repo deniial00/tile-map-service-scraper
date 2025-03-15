@@ -114,6 +114,16 @@ export class Database {
         `, [z]);
     }
 
+    async resetTiles() {
+        this.saveStats({
+            totalTiles: 0
+        });
+        
+        return this.run(`
+            DELETE FROM tiles;
+        `);
+    }
+
     async getTileCount() {
         return this.get('SELECT COUNT(*) as count FROM tiles');
     }
@@ -191,6 +201,82 @@ export class Database {
         return result;
     }
 
+    async saveStats(stats, append = false) {
+        const client = await this.connect();
+        try {
+            await client.query('BEGIN');
+            const existingStats = await this.get('SELECT * FROM stats WHERE id = 1'); // Assuming a single record for stats
+
+            if (existingStats) {
+                // Prepare the update query dynamically based on provided stats
+                const updates = [];
+                const values = [];
+
+                if (stats.totalTiles !== undefined) {
+                    const operation = append ? 'total_tiles + $' + (values.length + 1) : '$' + (values.length + 1);
+                    updates.push(`total_tiles = ${operation}`);
+                    values.push(stats.totalTiles);
+                }
+                if (stats.processedTiles !== undefined) {
+                    const operation = append ? 'processed_tiles + $' + (values.length + 1) : '$' + (values.length + 1);
+                    updates.push(`processed_tiles = ${operation}`);
+                    values.push(stats.processedTiles);
+                }
+                if (stats.updatedTiles !== undefined) {
+                    const operation = append ? 'updated_tiles + $' + (values.length + 1) : '$' + (values.length + 1);
+                    updates.push(`updated_tiles = ${operation}`);
+                    values.push(stats.updatedTiles);
+                }
+                if (stats.currentZoom !== undefined) {
+                    updates.push('current_zoom = $' + (values.length + 1));
+                    values.push(stats.currentZoom);
+                }
+                if (stats.initializationStartTime !== undefined) {
+                    updates.push('initialization_start_time = $' + (values.length + 1));
+                    values.push(stats.initializationStartTime);
+                }
+                if (stats.initializationEndTime !== undefined) {
+                    updates.push('initialization_end_time = $' + (values.length + 1));
+                    values.push(stats.initializationEndTime);
+                }
+
+                // Always set last_update when calling this function
+                updates.push('last_update = $' + (values.length + 1));
+                values.push(new Date());
+
+                if (updates.length > 0) {
+                    await client.query(`
+                        UPDATE stats 
+                        SET ${updates.join(', ')}
+                        WHERE id = 1
+                    `, values);
+                }
+            } else {
+                // Insert new stats
+                await client.query(`
+                    INSERT INTO stats (total_tiles, processed_tiles, updated_tiles, current_zoom, last_update, initialization_start_time, initialization_end_time)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [
+                    isNaN(stats.totalTiles) ? 0 : stats.totalTiles,
+                    isNaN(stats.processedTiles) ? 0 : stats.processedTiles,
+                    isNaN(stats.updatedTiles) ? 0 : stats.updatedTiles,
+                    stats.currentZoom,
+                    new Date(), // Always set last_update
+                    stats.initializationStartTime,
+                    stats.initializationEndTime
+                ]);
+            }
+            await client.query('COMMIT');
+        } catch (error) {
+            await client.query('ROLLBACK');
+            console.log(stats);
+            console.trace(error);
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
     async saveSettings(settings) {
         const client = await this.connect();
         try {
@@ -212,10 +298,18 @@ export class Database {
 
     // Statistics
     async getStats() {
-        return this.get(`
+        return await this.get(`
             SELECT 
-                (SELECT COUNT(*) FROM pbf_tiles) as current_tiles,
-                (SELECT COUNT(*) FROM pbf_tiles_history) as total_versions
+                total_tiles as "totalTiles",
+                processed_tiles as "processedTiles",
+                updated_tiles as "updatedTiles",
+                current_zoom as "currentZoom",
+                last_update as "lastUpdate",
+                initialization_start_time as "initializationStartTime",
+                initialization_end_time as "initializationEndTime"
+            FROM stats
+            ORDER BY id DESC
+            LIMIT 1
         `);
     }
 } 
