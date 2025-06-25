@@ -43,6 +43,18 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Create stats table
+CREATE TABLE IF NOT EXISTS stats (
+    id SERIAL PRIMARY KEY,
+    total_tiles INTEGER,
+    processed_tiles INTEGER,
+    updated_tiles INTEGER,
+    current_zoom INTEGER,
+    last_update TIMESTAMP,
+    initialization_start_time TIMESTAMP,
+    initialization_end_time TIMESTAMP
+);
+
 -- Add indices
 CREATE INDEX IF NOT EXISTS idx_pbf_modified 
 ON pbf_tiles(last_modified);

@@ -9,7 +9,7 @@ export class TileServer {
     async getTile(x, y, z) {
         try {
             const result = await this.db.get(
-                'SELECT data FROM pbf_tiles WHERE x = $1 AND y = $2 AND z = $3',
+                'SELECT data FROM pbf_tiles WHERE x=$1 AND y=$2 AND z=$3 LIMIT 1;',
                 [x, y, z]
             );
 

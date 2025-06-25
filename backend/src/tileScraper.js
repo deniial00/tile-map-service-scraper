@@ -17,7 +17,6 @@ export class TMSScraper {
             minQueueSize: 100,
             maxTilesToProcess: 1000,
             updateInterval: 24,
-            maxConcurrent: 5,
             minZoom: 10,
             maxZoom: 16,
             zoomLevels: [],

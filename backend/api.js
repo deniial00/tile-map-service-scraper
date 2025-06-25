@@ -1,5 +1,5 @@
 import express from 'express';
-import { HttpLogger } from './src/httpLogger.js';
+import { HttpLogger } from './src/logger/httpLogger.js';
 import { ScraperController } from './src/scrapeController.js';
 
 const app = express();
@@ -20,6 +20,38 @@ app.use((req, res, next) => {
 
 // Create controller (database will be initialized in constructor)
 const controller = new ScraperController();
+
+// Serve PBF tiles
+app.get('/api/tiles/:z/:x/:y.pbf', async (req, res) => {
+    const { z, x, y } = req.params;
+
+    // Validate tile coordinates
+    if (!controller.tileServer.validateTileCoordinates(x, y, z)) {
+        return res.status(400).json({ error: 'Invalid tile coordinates' });
+    }
+
+    try {
+
+        // const tileData = await controller.tileServer.getTile(x, y, z);
+        const tileData = await controller.tileServer.getTile(x, y, z);
+
+        if (!tileData) {
+            return res.status(404).send('Tile not found');
+        }
+
+        // Set appropriate headers
+        res.set({
+            'Content-Type': 'application/x-protobuf',
+            'Access-Control-Allow-Origin': '*',  // Enable CORS
+            'Cache-Control': 'public, max-age=86400'  // Cache for 24 hours
+        });
+
+        res.send(tileData);
+    } catch (error) {
+        console.error('Error serving tile:', error);
+        res.status(500).json({ error: 'Error serving tile' });
+    }
+});
 
 // Get current status
 app.get('/api/status', async (req, res) => {

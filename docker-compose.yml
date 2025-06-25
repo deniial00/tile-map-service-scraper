@@ -1,6 +1,14 @@
-version: '3.8'
+version: '3.9'
 
 services:
+
+  tileserver:
+    image: maptiler/tileserver-gl
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./tileserver-gl:/data
+
   postgres:
     build:
       context: ./database
@@ -48,6 +56,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    # volumes:
+    #   - ./frontend/src:/app/src
     ports:
       - "80:80"
     depends_on:

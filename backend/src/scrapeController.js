@@ -25,7 +25,6 @@ export class ScraperController {
             minQueueSize: 100,      // Minimum queue size before loading more tiles
             maxTilesToProcess: 0,   // 0 means process all tiles
             updateInterval: 24,     // Hours between updates for each tile
-            maxConcurrent: 5,       // Maximum concurrent tile fetches
             minZoom: 10,            // Minimum zoom level to scrape
             maxZoom: process.env.ZOOM_LEVEL || 15,            // Maximum zoom level to scrape
             zoomLevels: []          // Specific zoom levels to scrape (empty means all)
