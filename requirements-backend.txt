@@ -1,8 +1,0 @@
-# requirements-backend.txt
-fastapi==0.109.1
-uvicorn==0.27.0
-geopandas==0.14.1
-mercantile==1.2.1
-shapely==2.0.2
-sqlite3-api==2.0.1
-numpy<2
