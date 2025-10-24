@@ -228,7 +228,3 @@ The scraper includes robust error handling:
 3. Commit your changes
 4. Push to the branch
 5. Create a Pull Request
-
-## License
-
-[Your License Here]
